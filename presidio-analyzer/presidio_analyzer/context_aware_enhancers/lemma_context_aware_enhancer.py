@@ -1,5 +1,6 @@
 import copy
 import logging
+from bisect import bisect_right
 from typing import List, Optional, Set
 
 from presidio_analyzer import EntityRecognizer, RecognizerResult
@@ -110,6 +111,7 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
             logger.warning("NLP artifacts were not provided")
             return matched
 
+        lemmatized_keywords = None
         for i, result in enumerate(results):
             recognizer = None
             # get recognizer matching the result, if found.
@@ -150,8 +152,14 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
             # extract lemmatized context from the surrounding of the match
             word = text[result.start : result.end]
 
+            if lemmatized_keywords is None and nlp_artifacts.tokens:
+                lemmatized_keywords = set(nlp_artifacts.keywords)
+
             surrounding_words = self._extract_surrounding_words(
-                nlp_artifacts=nlp_artifacts, word=word, start=result.start
+                nlp_artifacts=nlp_artifacts,
+                word=word,
+                start=result.start,
+                lemmatized_keywords=lemmatized_keywords,
             )
 
             # combine other sources of context with surrounding words
@@ -234,7 +242,11 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
         return word
 
     def _extract_surrounding_words(
-        self, nlp_artifacts: NlpArtifacts, word: str, start: int
+        self,
+        nlp_artifacts: NlpArtifacts,
+        word: str,
+        start: int,
+        lemmatized_keywords: Optional[Set[str]] = None,
     ) -> List[str]:
         """Extract words surrounding another given word.
 
@@ -256,7 +268,8 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
 
         # Get the already prepared words in the given text, in their
         # LEMMATIZED version
-        lemmatized_keywords = nlp_artifacts.keywords
+        if lemmatized_keywords is None:
+            lemmatized_keywords = set(nlp_artifacts.keywords)
 
         # since the list of tokens is not necessarily aligned
         # with the actual index of the match, we look for the
@@ -295,7 +308,15 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
         tokens,
         tokens_indices: List[int],
     ) -> int:
-        found = False
+        """Return the token at or immediately covering the given text offset.
+
+        :param word: The matched text, used in the error message
+        :param start: The match's start offset in the original text
+        :param tokens: Original NLP tokens
+        :param tokens_indices: Start offset of each token
+        :return: Index of the token that contains or follows ``start``
+        :raises ValueError: If no token exists at or after ``start``
+        """
         # we use the known start index of the original word to find the actual
         # token at that index, we are not checking for equivalence since the
         # token might be just a substring of that word (e.g. for phone number
@@ -303,18 +324,10 @@ class LemmaContextAwareEnhancer(ContextAwareEnhancer):
         # rocket' the actual token will just be 'rocket' hence the misalignment
         # of indices)
         # Note: we are iterating over the original tokens (not the lemmatized)
-        i = -1
-        for i, token in enumerate(tokens, 0):
-            # Either we found a token with the exact location, or
-            # we take a token which its characters indices covers
-            # the index we are looking for.
-            if (tokens_indices[i] == start) or (start < tokens_indices[i] + len(token)):
-                # found the interesting token, the one that around it
-                # we take n words, we save the matching lemma
-                found = True
-                break
-
-        if not found:
+        i = bisect_right(tokens_indices, start) - 1
+        if i < 0 or tokens_indices[i] + len(tokens[i]) <= start:
+            i += 1
+        if i >= len(tokens):
             raise ValueError(
                 "Did not find word '" + word + "' "
                 "in the list of tokens although it "

@@ -15,6 +15,93 @@ def test_when_index_finding_then_succeed():
     assert index == 3
 
 
+def test_when_index_finding_at_token_boundary_then_use_following_token():
+    tokens = ["first", "second", "third"]
+    tokens_indices = [0, 6, 13]
+
+    index = LemmaContextAwareEnhancer._find_index_of_match_token(
+        "second", 6, tokens, tokens_indices
+    )
+
+    assert index == 1
+
+
+def test_when_index_finding_inside_token_then_use_covering_token():
+    tokens = ["prefix", "number", "suffix"]
+    tokens_indices = [0, 7, 14]
+
+    index = LemmaContextAwareEnhancer._find_index_of_match_token(
+        "umber", 8, tokens, tokens_indices
+    )
+
+    assert index == 1
+
+
+def test_when_index_finding_after_last_token_then_raise():
+    import pytest
+
+    with pytest.raises(ValueError, match="Did not find word 'missing'"):
+        LemmaContextAwareEnhancer._find_index_of_match_token(
+            "missing", 10, ["first"], [0]
+        )
+
+
+def test_when_enhancing_multiple_results_then_reuse_keyword_set(monkeypatch):
+    """Build the NLP keyword set once and reuse it for each result."""
+    from presidio_analyzer import Pattern, PatternRecognizer, RecognizerResult
+    from presidio_analyzer.nlp_engine import NlpArtifacts
+
+    text = "email one@example.com email two@example.com"
+    recognizer = PatternRecognizer(
+        supported_entity="EMAIL",
+        context=["email"],
+        patterns=[Pattern("email", r"[a-z]+@example\.com", 0.3)],
+    )
+    results = [
+        RecognizerResult(
+            "EMAIL",
+            6,
+            21,
+            0.3,
+            recognition_metadata={
+                RecognizerResult.RECOGNIZER_IDENTIFIER_KEY: recognizer.id
+            },
+        ),
+        RecognizerResult(
+            "EMAIL",
+            28,
+            43,
+            0.3,
+            recognition_metadata={
+                RecognizerResult.RECOGNIZER_IDENTIFIER_KEY: recognizer.id
+            },
+        ),
+    ]
+    artifacts = NlpArtifacts(
+        entities=[],
+        tokens=["email", "one", "example.com", "email", "two", "example.com"],
+        tokens_indices=[0, 6, 10, 22, 28, 32],
+        lemmas=["email", "one", "example.com", "email", "two", "example.com"],
+        nlp_engine=None,
+        language="en",
+    )
+    artifacts.keywords = ["email", "one", "example.com", "two"]
+
+    enhancer = LemmaContextAwareEnhancer()
+    original_extract = enhancer._extract_surrounding_words
+    keyword_sets = []
+
+    def capture_keywords(*args, **kwargs):
+        keyword_sets.append(kwargs["lemmatized_keywords"])
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(enhancer, "_extract_surrounding_words", capture_keywords)
+    enhancer.enhance_using_context(text, results, artifacts, [recognizer])
+
+    assert len(keyword_sets) == 2
+    assert keyword_sets[0] is keyword_sets[1]
+
+
 def test_when_context_word_substring_then_no_false_match():
     """
     Test that substring matching does not cause false positives.
